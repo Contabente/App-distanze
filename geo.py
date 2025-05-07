@@ -362,7 +362,7 @@ if uploaded_file:
                                     st.markdown("---")
                                 
                                 # Pulsante per procedere con le correzioni
-                                if st.button("Applica correzioni e calcola tragitto"):
+                               if st.button("Applica correzioni e calcola tragitto"):
     # Applica le correzioni direttamente al DataFrame principale
     for (addr_type, addr), corrected in address_corrections.items():
         if addr_type == "casa":
@@ -622,7 +622,6 @@ if uploaded_file:
                 
                 # Pulsante per applicare tutte le correzioni
                 if corrected_addresses:
-                    if corrected_addresses:
     if st.button("Applica tutte le correzioni"):
         # Applica direttamente le correzioni al DataFrame originale
         for (addr_type, old_addr), new_addr in corrected_addresses.items():
