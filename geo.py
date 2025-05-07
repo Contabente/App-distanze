@@ -55,35 +55,10 @@ def geocode_address(address):
         st.error(f"Errore durante la geocodifica: {e}")
         return None
 
-# Funzione per cercare suggerimenti per indirizzi non trovati
-def find_address_suggestions(address):
-    try:
-        base_url = "https://nominatim.openstreetmap.org/search"
-        params = {
-            "q": address,
-            "format": "json",
-            "limit": 5  # Otteniamo fino a 5 suggerimenti
-        }
-        headers = {
-            "User-Agent": "TragittoCalculator/1.0"
-        }
-        
-        response = requests.get(base_url, params=params, headers=headers)
-        data = response.json()
-        
-        suggestions = []
-        for item in data:
-            # Prendiamo l'indirizzo completo formattato da OSM
-            suggestions.append({
-                "display_name": item["display_name"],
-                "lat": float(item["lat"]),
-                "lon": float(item["lon"])
-            })
-        
-        return suggestions
-    except Exception as e:
-        st.error(f"Errore durante la ricerca di suggerimenti: {e}")
-        return []
+# Funzione per verificare la validità di un indirizzo
+def verify_address(address):
+    result = geocode_address(address)
+    return result is not None, result
 
 # Funzione per calcolare il percorso tra due punti usando OSRM
 def get_route(start_coords, end_coords):
@@ -163,6 +138,27 @@ def find_optimal_route(distances, start_index):
     
     return path
 
+# Funzione per verificare tutti gli indirizzi e identificare quelli non validi
+def check_all_addresses(df):
+    unique_addresses = set()
+    
+    # Raccogli tutti gli indirizzi unici (sia casa che lavoro)
+    for casa in df["CASA"].unique():
+        unique_addresses.add(casa)
+    for lavoro in df["LAVORO"].unique():
+        unique_addresses.add(lavoro)
+    
+    # Verifica ogni indirizzo
+    invalid_addresses = []
+    
+    with st.spinner("Verifico la validità degli indirizzi..."):
+        for address in unique_addresses:
+            is_valid, _ = verify_address(address)
+            if not is_valid:
+                invalid_addresses.append(address)
+    
+    return invalid_addresses
+
 # Funzione per calcolare e visualizzare la sommatoria dei km per tutti i giorni
 def calculate_total_km_for_all_days(df):
     giorni_disponibili = df["GIORNO"].unique().tolist()
@@ -184,48 +180,19 @@ def calculate_total_km_for_all_days(df):
                 coords_casa = geocode_address(casa_address)
                 if coords_casa is None:
                     st.error(f"Impossibile geocodificare l'indirizzo di casa per il giorno {giorno}: {casa_address}")
-                    
-                    # Cerca suggerimenti per l'indirizzo di casa
-                    suggestions = find_address_suggestions(casa_address)
-                    if suggestions:
-                        st.warning(f"Suggerimenti per l'indirizzo di casa ({giorno}):")
-                        for i, sugg in enumerate(suggestions[:3]):  # Limitiamo a 3 suggerimenti per non sovraccaricare
-                            if st.button(f"Usa: {sugg['display_name']}", key=f"casa_{giorno}_{i}"):
-                                coords_casa = (sugg["lat"], sugg["lon"])
-                                st.success(f"Indirizzo di casa sostituito con: {sugg['display_name']}")
-                                # Aggiorniamo anche il dataframe
-                                df.loc[(df["GIORNO"] == giorno) & (df["CASA"] == casa_address), "CASA"] = sugg["display_name"]
-                    
-                    if coords_casa is None:
-                        continue
+                    continue
                 
                 coords_lavoro_list = []
                 geocode_failed = False
-                
                 for addr in lavoro_addresses:
                     coords = geocode_address(addr)
                     if coords is None:
                         st.error(f"Impossibile geocodificare l'indirizzo di lavoro per il giorno {giorno}: {addr}")
-                        
-                        # Cerca suggerimenti
-                        suggestions = find_address_suggestions(addr)
-                        if suggestions:
-                            st.warning(f"Suggerimenti per l'indirizzo di lavoro '{addr}' ({giorno}):")
-                            for i, sugg in enumerate(suggestions[:3]):  # Limitiamo a 3 suggerimenti
-                                if st.button(f"Usa: {sugg['display_name']}", key=f"lavoro_{giorno}_{addr}_{i}"):
-                                    coords = (sugg["lat"], sugg["lon"])
-                                    st.success(f"Indirizzo di lavoro sostituito con: {sugg['display_name']}")
-                                    # Aggiorniamo anche il dataframe
-                                    df.loc[(df["GIORNO"] == giorno) & (df["LAVORO"] == addr), "LAVORO"] = sugg["display_name"]
-                        
-                        if coords is None:
-                            geocode_failed = True
-                            break
-                    
+                        geocode_failed = True
+                        break
                     coords_lavoro_list.append(coords)
                 
                 if geocode_failed:
-                    st.warning(f"Risolvi gli indirizzi problematici per il giorno {giorno} e riprova.")
                     continue
                 
                 # Crea lista completa di coordinate con casa come prima posizione
@@ -265,23 +232,19 @@ def calculate_total_km_for_all_days(df):
     
     return risultati_totali, round(distanza_totale_complessiva, 2), round(durata_totale_complessiva, 0)
 
-# Creiamo una sessione state per mantenere il dataframe tra i refresh
-if 'df' not in st.session_state:
-    st.session_state.df = None
-if 'indirizzo_sostituito' not in st.session_state:
-    st.session_state.indirizzo_sostituito = False
-
 # Sezione per il caricamento del file
 uploaded_file = st.file_uploader("Carica il tuo file CSV", type=["csv"])
 
+# Inizializza l'oggetto session_state per il dataframe
+if 'df' not in st.session_state:
+    st.session_state.df = None
+
 if uploaded_file:
-    # Carica il file solo se è un nuovo upload o se non l'abbiamo ancora caricato
+    # Carica il dataframe solo se non è già stato caricato
     if st.session_state.df is None:
-        df = load_csv(uploaded_file)
-        if df is not None:
-            st.session_state.df = df
-    else:
-        df = st.session_state.df
+        st.session_state.df = load_csv(uploaded_file)
+    
+    df = st.session_state.df
     
     if df is not None:
         st.success("File caricato con successo!")
@@ -289,6 +252,90 @@ if uploaded_file:
         # Mostra anteprima dei dati
         st.subheader("Anteprima dei dati")
         st.dataframe(df.head())
+        
+        # Verifica se ci sono indirizzi non validi
+        if st.button("Verifica validità degli indirizzi"):
+            invalid_addresses = check_all_addresses(df)
+            
+            if invalid_addresses:
+                st.error(f"Trovati {len(invalid_addresses)} indirizzi non validi!")
+                
+                # Salva gli indirizzi non validi nella session_state
+                if 'invalid_addresses' not in st.session_state:
+                    st.session_state.invalid_addresses = invalid_addresses
+                    # Inizializza i campi di testo per la correzione
+                    st.session_state.address_corrections = {addr: addr for addr in invalid_addresses}
+                    # Inizializza lo stato di validità per ogni indirizzo corretto
+                    st.session_state.address_valid_status = {addr: False for addr in invalid_addresses}
+            else:
+                st.success("Tutti gli indirizzi sono validi!")
+                # Resetta le variabili di session_state relative agli indirizzi non validi
+                if 'invalid_addresses' in st.session_state:
+                    del st.session_state.invalid_addresses
+                if 'address_corrections' in st.session_state:
+                    del st.session_state.address_corrections
+                if 'address_valid_status' in st.session_state:
+                    del st.session_state.address_valid_status
+        
+        # Mostra l'interfaccia per correggere gli indirizzi non validi
+        if 'invalid_addresses' in st.session_state and st.session_state.invalid_addresses:
+            st.subheader("Correzione degli indirizzi non validi")
+            st.markdown("Modifica gli indirizzi non validi e premi 'Check' per verificare la loro validità.")
+            
+            # Crea campi di testo editabili per ogni indirizzo non valido
+            for addr in st.session_state.invalid_addresses:
+                col1, col2, col3 = st.columns([3, 1, 1])
+                
+                with col1:
+                    # Campo di testo per correggere l'indirizzo
+                    corrected_addr = st.text_input(f"Indirizzo non valido: {addr}", 
+                                                  value=st.session_state.address_corrections[addr],
+                                                  key=f"correction_{addr}")
+                    # Aggiorna il valore corrente nella session_state
+                    st.session_state.address_corrections[addr] = corrected_addr
+                
+                with col2:
+                    # Pulsante per verificare l'indirizzo corretto
+                    if st.button("Check", key=f"check_{addr}"):
+                        is_valid, _ = verify_address(corrected_addr)
+                        if is_valid:
+                            st.session_state.address_valid_status[addr] = True
+                            st.success("Indirizzo valido!")
+                        else:
+                            st.session_state.address_valid_status[addr] = False
+                            st.error("Indirizzo ancora non valido!")
+                
+                with col3:
+                    # Mostra lo stato di validità dell'indirizzo
+                    if st.session_state.address_valid_status[addr]:
+                        st.success("Valido ✓")
+                    else:
+                        st.error("Non valido ✗")
+            
+            # Pulsante per applicare tutte le correzioni
+            if st.button("Applica tutte le correzioni"):
+                # Verifica se tutti gli indirizzi sono stati corretti e validati
+                if all(st.session_state.address_valid_status.values()):
+                    # Applica le correzioni al dataframe
+                    df_copy = df.copy()
+                    
+                    for old_addr, new_addr in st.session_state.address_corrections.items():
+                        # Sostituisci sia nella colonna CASA che LAVORO
+                        df_copy.loc[df_copy["CASA"] == old_addr, "CASA"] = new_addr
+                        df_copy.loc[df_copy["LAVORO"] == old_addr, "LAVORO"] = new_addr
+                    
+                    # Aggiorna il dataframe nella session_state
+                    st.session_state.df = df_copy
+                    
+                    # Resetta gli indirizzi non validi
+                    del st.session_state.invalid_addresses
+                    del st.session_state.address_corrections
+                    del st.session_state.address_valid_status
+                    
+                    st.success("Tutte le correzioni sono state applicate con successo!")
+                    st.experimental_rerun()
+                else:
+                    st.error("Non tutti gli indirizzi sono stati corretti e validati. Verifica ogni indirizzo con il pulsante 'Check'.")
         
         # Aggiungi tab per separare le funzionalità
         tab1, tab2 = st.tabs(["Calcolo Giornaliero", "Riepilogo Totale"])
@@ -306,10 +353,21 @@ if uploaded_file:
                     submit = st.form_submit_button("Aggiungi")
                     
                     if submit and casa and lavoro:
-                        new_row = pd.DataFrame({"CASA": [casa], "LAVORO": [lavoro], "GIORNO": [giorno.strftime("%d/%m/%Y")]})
-                        df = pd.concat([df, new_row], ignore_index=True)
-                        st.success("Indirizzo aggiunto!")
-                        st.dataframe(df)
+                        # Verifica la validità degli indirizzi prima di aggiungerli
+                        casa_valid, _ = verify_address(casa)
+                        lavoro_valid, _ = verify_address(lavoro)
+                        
+                        if not casa_valid:
+                            st.error(f"Indirizzo di casa non valido: {casa}")
+                        if not lavoro_valid:
+                            st.error(f"Indirizzo di lavoro non valido: {lavoro}")
+                        
+                        if casa_valid and lavoro_valid:
+                            new_row = pd.DataFrame({"CASA": [casa], "LAVORO": [lavoro], "GIORNO": [giorno.strftime("%d/%m/%Y")]})
+                            df = pd.concat([df, new_row], ignore_index=True)
+                            st.session_state.df = df
+                            st.success("Indirizzo aggiunto!")
+                            st.dataframe(df)
             
             # Sezione per selezionare un giorno dal CSV
             if not df.empty:
@@ -339,75 +397,22 @@ if uploaded_file:
                                 
                                 if coords_casa is None:
                                     st.error(f"Impossibile geocodificare l'indirizzo di casa: {casa_address}")
-                                    
-                                    # Cerca suggerimenti
-                                    suggestions = find_address_suggestions(casa_address)
-                                    if suggestions:
-                                        st.warning("Suggerimenti per l'indirizzo di casa:")
-                                        suggestion_options = [sugg["display_name"] for sugg in suggestions]
-                                        selected_suggestion = st.selectbox("Seleziona un indirizzo alternativo:", suggestion_options)
-                                        
-                                        if st.button("Usa questo indirizzo"):
-                                            # Trova il suggerimento selezionato
-                                            for sugg in suggestions:
-                                                if sugg["display_name"] == selected_suggestion:
-                                                    coords_casa = (sugg["lat"], sugg["lon"])
-                                                    st.success(f"Indirizzo di casa sostituito con: {selected_suggestion}")
-                                                    break
-                                    
-                                    # Se ancora non abbiamo coordinate valide, fermiamo l'esecuzione
-                                    if coords_casa is None:
-                                        st.stop()
+                                    st.stop()
                                 
                                 coords_lavoro_list = []
-                                addresses_with_issues = []
-                                
-                                for i, addr in enumerate(lavoro_addresses):
+                                invalid_work_addresses = []
+                                for addr in lavoro_addresses:
                                     coords = geocode_address(addr)
                                     if coords is None:
-                                        addresses_with_issues.append((i, addr))
+                                        invalid_work_addresses.append(addr)
                                     else:
                                         coords_lavoro_list.append(coords)
                                 
-                                # Gestisci gli indirizzi problematici
-                                if addresses_with_issues:
-                                    for idx, problematic_addr in addresses_with_issues:
-                                        st.error(f"Impossibile geocodificare l'indirizzo di lavoro: {problematic_addr}")
-                                        
-                                        # Cerca suggerimenti
-                                        suggestions = find_address_suggestions(problematic_addr)
-                                        if suggestions:
-                                            st.warning(f"Suggerimenti per l'indirizzo '{problematic_addr}':")
-                                            suggestion_options = [sugg["display_name"] for sugg in suggestions]
-                                            col_select, col_button = st.columns([3, 1])
-                                            
-                                            with col_select:
-                                                suggestion_key = f"suggestion_{idx}"
-                                                selected_suggestion = st.selectbox(
-                                                    "Seleziona un indirizzo alternativo:", 
-                                                    suggestion_options,
-                                                    key=suggestion_key
-                                                )
-                                            
-                                            with col_button:
-                                                button_key = f"use_button_{idx}"
-                                                if st.button("Usa questo", key=button_key):
-                                                    # Trova il suggerimento selezionato
-                                                    for sugg in suggestions:
-                                                        if sugg["display_name"] == selected_suggestion:
-                                                            new_coords = (sugg["lat"], sugg["lon"])
-                                                            coords_lavoro_list.append(new_coords)
-                                                            st.success(f"Indirizzo sostituito con: {selected_suggestion}")
-                                                            
-                                                            # Aggiorna il dataframe per future esecuzioni
-                                                            df.loc[df["LAVORO"] == problematic_addr, "LAVORO"] = selected_suggestion
-                                                            break
-                                    
-                                    # Verifica se abbiamo risolto tutti i problemi
-                                    if len(coords_lavoro_list) != len(lavoro_addresses):
-                                        remaining_issues = len(lavoro_addresses) - len(coords_lavoro_list)
-                                        st.warning(f"Ci sono ancora {remaining_issues} indirizzi non risolti. Correggi gli indirizzi e riprova.")
-                                        st.stop()
+                                if invalid_work_addresses:
+                                    st.error("Impossibile geocodificare i seguenti indirizzi di lavoro:")
+                                    for addr in invalid_work_addresses:
+                                        st.error(f"- {addr}")
+                                    st.stop()
                             
                             # Crea lista completa di coordinate con casa come prima posizione
                             all_coords = [coords_casa] + coords_lavoro_list
@@ -573,24 +578,34 @@ else:
             submit = st.form_submit_button("Aggiungi")
             
             if submit and casa and lavoro:
-                new_row = pd.DataFrame({
-                    "CASA": [casa], 
-                    "LAVORO": [lavoro], 
-                    "GIORNO": [giorno.strftime("%d/%m/%Y")]
-                })
-                df = pd.concat([df, new_row], ignore_index=True)
+                # Verifica gli indirizzi prima di aggiungerli
+                casa_valid, _ = verify_address(casa)
+                lavoro_valid, _ = verify_address(lavoro)
                 
-                # Scarica il file creato
-                csv = df.to_csv(sep=";", index=False)
-                st.download_button(
-                    label="Scarica CSV",
-                    data=csv,
-                    file_name="indirizzi.csv",
-                    mime="text/csv"
-                )
+                if not casa_valid:
+                    st.error(f"Indirizzo di casa non valido: {casa}")
+                if not lavoro_valid:
+                    st.error(f"Indirizzo di lavoro non valido: {lavoro}")
                 
-                st.success("File creato con successo!")
-                st.dataframe(df)
+                if casa_valid and lavoro_valid:
+                    new_row = pd.DataFrame({
+                        "CASA": [casa], 
+                        "LAVORO": [lavoro], 
+                        "GIORNO": [giorno.strftime("%d/%m/%Y")]
+                    })
+                    df = pd.concat([df, new_row], ignore_index=True)
+                    
+                    # Scarica il file creato
+                    csv = df.to_csv(sep=";", index=False)
+                    st.download_button(
+                        label="Scarica CSV",
+                        data=csv,
+                        file_name="indirizzi.csv",
+                        mime="text/csv"
+                    )
+                    
+                    st.success("File creato con successo!")
+                    st.dataframe(df)
 
 # Aggiungi istruzioni d'uso
 with st.expander("Come usare questa applicazione"):
@@ -598,51 +613,6 @@ with st.expander("Come usare questa applicazione"):
     ### Istruzioni per l'uso
     
     1. **Carica il tuo file CSV** con le colonne CASA, LAVORO e GIORNO.
-    2. **Seleziona un giorno** dalla lista dei giorni disponibili oppure usa la tab "Riepilogo Totale" per calcolare i km totali per tutti i giorni.
-    3. **Premi 'Calcola Tragitto Ottimale'** per vedere il percorso ottimale che inizia da casa, passa per tutti i luoghi di lavoro e torna a casa.
-    4. **Premi 'Calcola Totale per Tutti i Giorni'** nella tab "Riepilogo Totale" per vedere la sommatoria dei chilometri per tutti i giorni.
-    5. **Se un indirizzo non viene trovato**, l'applicazione ti suggerirà alternative. Puoi selezionare l'indirizzo corretto tra i suggerimenti e usarlo per il calcolo.
-    6. **Dopo aver corretto degli indirizzi**, puoi scaricare il file CSV aggiornato utilizzando il pulsante in fondo alla pagina.
-    
-    ### Formato del file CSV
-    
-    Il file CSV deve avere le seguenti colonne:
-    - **CASA**: indirizzo completo dell'abitazione
-    - **LAVORO**: indirizzo completo del posto di lavoro
-    - **GIORNO**: data nel formato GG/MM/AAAA
-    
-    Esempio:
-    ```
-    CASA;LAVORO;GIORNO
-    Via Roma 1, Milano;Via Dante 15, Milano;01/05/2025
-    Via Roma 1, Milano;Via Montenapoleone 8, Milano;01/05/2025
-    Via Roma 1, Milano;Piazza Duomo 1, Milano;01/05/2025
-    ```
-    
-    ### Note
-    - L'applicazione calcola il percorso ottimale partendo da casa, passando per tutti i luoghi di lavoro e tornando a casa.
-    - Per ogni giorno, puoi avere più luoghi di lavoro da visitare.
-    - L'applicazione utilizza API gratuite (OpenStreetMap e OSRM) per la geocodifica e il calcolo del percorso.
-    - Il calcolo della sommatoria totale può richiedere tempo se ci sono molti giorni/indirizzi.
-    """)
-
-# Opzione per scaricare il CSV aggiornato con gli indirizzi corretti
-if st.session_state.df is not None:
-    st.markdown("---")
-    st.subheader("Scarica il file CSV aggiornato")
-    st.write("Se hai corretto degli indirizzi, puoi scaricare il file CSV aggiornato:")
-    
-    # Crea il CSV aggiornato
-    csv_aggiornato = st.session_state.df.to_csv(sep=";", index=False)
-    
-    # Bottone per scaricare
-    st.download_button(
-        label="Scarica CSV aggiornato",
-        data=csv_aggiornato,
-        file_name="indirizzi_aggiornati.csv",
-        mime="text/csv"
-    )
-
-# Footer con informazioni
-st.markdown("---")
-st.markdown("Applicazione creata con Streamlit. Utilizza le API gratuite di OpenStreetMap e OSRM.")
+    2. **Verifica la validità degli indirizzi** con il pulsante dedicato. Segui le istruzioni per correggere eventuali indirizzi non validi.
+    3. **Seleziona un giorno** dalla lista dei giorni disponibili oppure usa la tab "Riepilogo Totale" per calcolare i km totali per tutti i giorni.
+    4. **Premi
