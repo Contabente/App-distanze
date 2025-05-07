@@ -5,6 +5,7 @@ import numpy as np
 from datetime import datetime
 import itertools
 import os
+import time
 
 st.set_page_config(page_title="Calcolatore Tragitto Multi-Tappa", layout="wide")
 
@@ -36,16 +37,11 @@ def geocode_address(address):
         params = {
             "q": address,
             "format": "json",
-            "limit": 1,
-            "addressdetails": 1     # Richiedi dettagli dell'indirizzo
+            "limit": 1
         }
         headers = {
             "User-Agent": "TragittoCalculator/1.0"  # Necessario per le regole di Nominatim
         }
-        
-        # Aggiungi un ritardo per rispettare i limiti di utilizzo di Nominatim (max 1 richiesta al secondo)
-        import time
-        time.sleep(1)
         
         response = requests.get(base_url, params=params, headers=headers)
         data = response.json()
@@ -53,20 +49,37 @@ def geocode_address(address):
         if data and len(data) > 0:
             lat = float(data[0]["lat"])
             lon = float(data[0]["lon"])
-            return lat, lon
+            return lat, lon, data[0]["display_name"] if "display_name" in data[0] else None
         else:
-            return None
+            return None, None, None
     except Exception as e:
         st.error(f"Errore durante la geocodifica: {e}")
-        return None
+        return None, None, None
 
-# Funzione per verificare la validità di un indirizzo
-def verify_address(address):
-    if not address or address.strip() == "":
-        return False, None
-    
-    result = geocode_address(address)
-    return result is not None, result
+# Funzione per ottenere suggerimenti di indirizzi
+def get_address_suggestions(address):
+    try:
+        base_url = "https://nominatim.openstreetmap.org/search"
+        params = {
+            "q": address,
+            "format": "json",
+            "limit": 3  # Ottieni più risultati per i suggerimenti
+        }
+        headers = {
+            "User-Agent": "TragittoCalculator/1.0"
+        }
+        
+        response = requests.get(base_url, params=params, headers=headers)
+        data = response.json()
+        
+        suggestions = []
+        if data and len(data) > 0:
+            for item in data:
+                if "display_name" in item:
+                    suggestions.append(item["display_name"])
+        return suggestions
+    except Exception as e:
+        return []
 
 # Funzione per calcolare il percorso tra due punti usando OSRM
 def get_route(start_coords, end_coords):
@@ -107,8 +120,10 @@ def calculate_distance_matrix(coords_list):
                     distances[i, j] = dist
                     durations[i, j] = dur
                 else:
-                    st.error(f"Impossibile calcolare la distanza tra i punti {i} e {j}")
-                    return None, None
+                    st.warning(f"Impossibile calcolare la distanza tra i punti {i} e {j}")
+                    # Imposta valori predefiniti invece di fermare il calcolo
+                    distances[i, j] = 9999  # Valore alto per evitare questo percorso
+                    durations[i, j] = 9999
     
     return distances, durations
 
@@ -146,26 +161,21 @@ def find_optimal_route(distances, start_index):
     
     return path
 
-# Funzione per verificare tutti gli indirizzi e identificare quelli non validi
-def check_all_addresses(df):
-    unique_addresses = set()
-    
-    # Raccogli tutti gli indirizzi unici (sia casa che lavoro)
-    for casa in df["CASA"].unique():
-        unique_addresses.add(casa)
-    for lavoro in df["LAVORO"].unique():
-        unique_addresses.add(lavoro)
-    
-    # Verifica ogni indirizzo
+# Funzione per verificare la validità di tutti gli indirizzi
+def validate_addresses(addresses_list):
     invalid_addresses = []
+    valid_addresses = []
+    valid_coords = []
     
-    with st.spinner("Verifico la validità degli indirizzi..."):
-        for address in unique_addresses:
-            is_valid, _ = verify_address(address)
-            if not is_valid:
-                invalid_addresses.append(address)
+    for i, address in enumerate(addresses_list):
+        lat, lon, full_address = geocode_address(address)
+        if lat is None or lon is None:
+            invalid_addresses.append((i, address, None))
+        else:
+            valid_addresses.append(address)
+            valid_coords.append((lat, lon))
     
-    return invalid_addresses
+    return invalid_addresses, valid_addresses, valid_coords
 
 # Funzione per calcolare e visualizzare la sommatoria dei km per tutti i giorni
 def calculate_total_km_for_all_days(df):
@@ -173,6 +183,9 @@ def calculate_total_km_for_all_days(df):
     risultati_totali = []
     distanza_totale_complessiva = 0
     durata_totale_complessiva = 0
+    
+    # Raccogliamo tutti gli indirizzi problematici
+    problematic_addresses = []
 
     with st.spinner("Calcolo dei percorsi per tutti i giorni..."):
         for giorno in giorni_disponibili:
@@ -186,31 +199,31 @@ def calculate_total_km_for_all_days(df):
                 
                 # Geocodifica tutti gli indirizzi
                 coords_casa = geocode_address(casa_address)
-                if coords_casa is None:
-                    st.error(f"Impossibile geocodificare l'indirizzo di casa per il giorno {giorno}: {casa_address}")
+                if coords_casa[0] is None:
+                    problematic_addresses.append(("casa", casa_address, giorno))
                     continue
                 
                 coords_lavoro_list = []
                 geocode_failed = False
                 for addr in lavoro_addresses:
                     coords = geocode_address(addr)
-                    if coords is None:
-                        st.error(f"Impossibile geocodificare l'indirizzo di lavoro per il giorno {giorno}: {addr}")
+                    if coords[0] is None:
+                        problematic_addresses.append(("lavoro", addr, giorno))
                         geocode_failed = True
-                        break
-                    coords_lavoro_list.append(coords)
+                    else:
+                        coords_lavoro_list.append((coords[0], coords[1]))
                 
                 if geocode_failed:
                     continue
                 
                 # Crea lista completa di coordinate con casa come prima posizione
-                all_coords = [coords_casa] + coords_lavoro_list
+                all_coords = [(coords_casa[0], coords_casa[1])] + coords_lavoro_list
                 
                 # Calcola la matrice delle distanze
                 distances, durations = calculate_distance_matrix(all_coords)
                 
                 if distances is None or durations is None:
-                    st.error(f"Impossibile calcolare la matrice delle distanze per il giorno {giorno}.")
+                    st.warning(f"Impossibile calcolare la matrice delle distanze per il giorno {giorno}. Verrà saltato.")
                     continue
                 
                 # Trova il percorso ottimale
@@ -238,21 +251,13 @@ def calculate_total_km_for_all_days(df):
                     "Tempo Stimato (min)": round(total_duration, 0)
                 })
     
-    return risultati_totali, round(distanza_totale_complessiva, 2), round(durata_totale_complessiva, 0)
+    return risultati_totali, round(distanza_totale_complessiva, 2), round(durata_totale_complessiva, 0), problematic_addresses
 
 # Sezione per il caricamento del file
 uploaded_file = st.file_uploader("Carica il tuo file CSV", type=["csv"])
 
-# Inizializza l'oggetto session_state per il dataframe
-if 'df' not in st.session_state:
-    st.session_state.df = None
-
 if uploaded_file:
-    # Carica il dataframe solo se non è già stato caricato
-    if st.session_state.df is None:
-        st.session_state.df = load_csv(uploaded_file)
-    
-    df = st.session_state.df
+    df = load_csv(uploaded_file)
     
     if df is not None:
         st.success("File caricato con successo!")
@@ -261,127 +266,8 @@ if uploaded_file:
         st.subheader("Anteprima dei dati")
         st.dataframe(df.head())
         
-        # Verifica se ci sono indirizzi non validi
-        col1, col2 = st.columns([1, 3])
-        with col1:
-            if st.button("Verifica validità degli indirizzi", type="primary"):
-                with st.spinner("Verifico tutti gli indirizzi..."):
-                    invalid_addresses = check_all_addresses(df)
-                
-                if invalid_addresses:
-                    st.error(f"Trovati {len(invalid_addresses)} indirizzi non validi!")
-                    
-                    # Salva gli indirizzi non validi nella session_state
-                    st.session_state.invalid_addresses = invalid_addresses
-                    # Inizializza i campi di testo per la correzione
-                    st.session_state.address_corrections = {addr: addr for addr in invalid_addresses}
-                    # Inizializza lo stato di validità per ogni indirizzo corretto
-                    st.session_state.address_valid_status = {addr: False for addr in invalid_addresses}
-                    
-                    # Forza un refresh della pagina per mostrare i form
-                    st.experimental_rerun()
-                else:
-                    st.success("Tutti gli indirizzi sono validi!")
-                    # Resetta le variabili di session_state relative agli indirizzi non validi
-                    if 'invalid_addresses' in st.session_state:
-                        del st.session_state.invalid_addresses
-                    if 'address_corrections' in st.session_state:
-                        del st.session_state.address_corrections
-                    if 'address_valid_status' in st.session_state:
-                        del st.session_state.address_valid_status
-                    if 'form_keys' in st.session_state:
-                        del st.session_state.form_keys
-        
-                    # Mostra l'interfaccia per correggere gli indirizzi non validi
-        if 'invalid_addresses' in st.session_state and st.session_state.invalid_addresses:
-            st.subheader("Correzione degli indirizzi non validi")
-            st.markdown("Modifica gli indirizzi non validi e premi 'Check' per verificare la loro validità.")
-            
-            # Inizializza i form keys se non esistono
-            if 'form_keys' not in st.session_state:
-                st.session_state.form_keys = {}
-                for addr in st.session_state.invalid_addresses:
-                    st.session_state.form_keys[addr] = f"form_{addr.replace(' ', '_').replace(',', '')}"
-            
-            # Crea campi di testo editabili per ogni indirizzo non valido
-            for addr in st.session_state.invalid_addresses:
-                # Identifica univocamente ciascun indirizzo
-                form_key = st.session_state.form_keys[addr]
-                
-                # Mostra lo stato di validità corrente
-                if st.session_state.address_valid_status[addr]:
-                    st.success(f"✓ L'indirizzo è stato convalidato")
-                else:
-                    st.error(f"✗ Indirizzo non valido: {addr}")
-                
-                # Crea un form per ogni indirizzo
-                with st.form(key=form_key):
-                    col1, col2 = st.columns([4, 1])
-                    
-                    with col1:
-                        # Campo di testo per correggere l'indirizzo
-                        corrected_addr = st.text_input(
-                            "Nuovo indirizzo", 
-                            value=st.session_state.address_corrections[addr],
-                            key=f"input_{form_key}"
-                        )
-                    
-                    # Pulsante per verificare l'indirizzo corretto
-                    check_button = st.form_submit_button("Check")
-                    
-                    if check_button:
-                        # Aggiorna il valore corrente nella session_state
-                        st.session_state.address_corrections[addr] = corrected_addr
-                        
-                        # Verifica la validità
-                        is_valid, coords = verify_address(corrected_addr)
-                        if is_valid:
-                            st.session_state.address_valid_status[addr] = True
-                            st.success(f"✓ Indirizzo valido! Coordinate: {coords}")
-                        else:
-                            st.session_state.address_valid_status[addr] = False
-                            st.error("✗ Indirizzo ancora non valido, prova a essere più specifico.")
-                
-                # Aggiungi un separatore tra i form
-                st.markdown("---")
-            
-            # Pulsante per applicare tutte le correzioni
-            col1, col2 = st.columns([1, 4])
-            with col1:
-                if st.button("Applica tutte le correzioni", type="primary"):
-                    # Verifica se tutti gli indirizzi sono stati corretti e validati
-                    if all(st.session_state.address_valid_status.values()):
-                        # Applica le correzioni al dataframe
-                        df_copy = df.copy()
-                        
-                        for old_addr, new_addr in st.session_state.address_corrections.items():
-                            # Sostituisci sia nella colonna CASA che LAVORO
-                            df_copy.loc[df_copy["CASA"] == old_addr, "CASA"] = new_addr
-                            df_copy.loc[df_copy["LAVORO"] == old_addr, "LAVORO"] = new_addr
-                        
-                        # Aggiorna il dataframe nella session_state
-                        st.session_state.df = df_copy
-                        
-                        # Resetta gli indirizzi non validi
-                        del st.session_state.invalid_addresses
-                        del st.session_state.address_corrections
-                        del st.session_state.address_valid_status
-                        if 'form_keys' in st.session_state:
-                            del st.session_state.form_keys
-                        
-                        st.success("Tutte le correzioni sono state applicate con successo!")
-                        st.experimental_rerun()
-                    else:
-                        st.error("Non tutti gli indirizzi sono stati corretti e validati. Verifica ogni indirizzo con il pulsante 'Check'.")
-            
-            # Mostra un conteggio degli indirizzi validi/non validi
-            valid_count = sum(st.session_state.address_valid_status.values())
-            total_count = len(st.session_state.address_valid_status)
-            with col2:
-                st.info(f"Indirizzi validi: {valid_count}/{total_count}")
-        
         # Aggiungi tab per separare le funzionalità
-        tab1, tab2 = st.tabs(["Calcolo Giornaliero", "Riepilogo Totale"])
+        tab1, tab2, tab3 = st.tabs(["Calcolo Giornaliero", "Riepilogo Totale", "Verifica Indirizzi"])
         
         with tab1:
             # Processo di aggiunta degli indirizzi se necessario
@@ -396,21 +282,10 @@ if uploaded_file:
                     submit = st.form_submit_button("Aggiungi")
                     
                     if submit and casa and lavoro:
-                        # Verifica la validità degli indirizzi prima di aggiungerli
-                        casa_valid, _ = verify_address(casa)
-                        lavoro_valid, _ = verify_address(lavoro)
-                        
-                        if not casa_valid:
-                            st.error(f"Indirizzo di casa non valido: {casa}")
-                        if not lavoro_valid:
-                            st.error(f"Indirizzo di lavoro non valido: {lavoro}")
-                        
-                        if casa_valid and lavoro_valid:
-                            new_row = pd.DataFrame({"CASA": [casa], "LAVORO": [lavoro], "GIORNO": [giorno.strftime("%d/%m/%Y")]})
-                            df = pd.concat([df, new_row], ignore_index=True)
-                            st.session_state.df = df
-                            st.success("Indirizzo aggiunto!")
-                            st.dataframe(df)
+                        new_row = pd.DataFrame({"CASA": [casa], "LAVORO": [lavoro], "GIORNO": [giorno.strftime("%d/%m/%Y")]})
+                        df = pd.concat([df, new_row], ignore_index=True)
+                        st.success("Indirizzo aggiunto!")
+                        st.dataframe(df)
             
             # Sezione per selezionare un giorno dal CSV
             if not df.empty:
@@ -436,139 +311,197 @@ if uploaded_file:
                             
                             # Geocodifica tutti gli indirizzi
                             with st.spinner("Geocodifica degli indirizzi in corso..."):
-                                coords_casa = geocode_address(casa_address)
+                                # Raccogliere gli indirizzi problematici
+                                problematic_addresses = []
                                 
-                                if coords_casa is None:
-                                    st.error(f"Impossibile geocodificare l'indirizzo di casa: {casa_address}")
-                                    st.stop()
+                                # Verifica indirizzo casa
+                                lat_casa, lon_casa, full_casa = geocode_address(casa_address)
+                                if lat_casa is None:
+                                    problematic_addresses.append(("casa", casa_address))
                                 
-                                coords_lavoro_list = []
-                                invalid_work_addresses = []
+                                # Verifica indirizzi lavoro
                                 for addr in lavoro_addresses:
-                                    coords = geocode_address(addr)
-                                    if coords is None:
-                                        invalid_work_addresses.append(addr)
-                                    else:
-                                        coords_lavoro_list.append(coords)
+                                    lat, lon, full_addr = geocode_address(addr)
+                                    if lat is None:
+                                        problematic_addresses.append(("lavoro", addr))
+                            
+                            # Se ci sono indirizzi problematici, mostra l'interfaccia di correzione
+                            if problematic_addresses:
+                                st.warning("Alcuni indirizzi non sono stati trovati. Per favore, correggi gli indirizzi seguenti:")
                                 
-                                if invalid_work_addresses:
-                                    st.error("Impossibile geocodificare i seguenti indirizzi di lavoro:")
-                                    for addr in invalid_work_addresses:
-                                        st.error(f"- {addr}")
-                                    st.stop()
-                            
-                            # Crea lista completa di coordinate con casa come prima posizione
-                            all_coords = [coords_casa] + coords_lavoro_list
-                            all_addresses = [casa_address] + lavoro_addresses
-                            
-                            # Calcola la matrice delle distanze
-                            with st.spinner("Calcolo delle distanze tra tutti i punti..."):
-                                distances, durations = calculate_distance_matrix(all_coords)
+                                # Crea un dizionario per memorizzare le correzioni
+                                address_corrections = {}
+                                for i, (addr_type, addr) in enumerate(problematic_addresses):
+                                    st.subheader(f"Indirizzo {addr_type} non trovato: {addr}")
+                                    
+                                    # Ottieni suggerimenti
+                                    suggestions = get_address_suggestions(addr)
+                                    
+                                    # Mostra i suggerimenti
+                                    if suggestions:
+                                        st.write("Suggerimenti:")
+                                        for sugg in suggestions:
+                                            if st.button(f"Usa: {sugg}", key=f"sugg_{i}_{sugg[:10]}"):
+                                                # Imposta il suggerimento come correzione
+                                                address_corrections[(addr_type, addr)] = sugg
+                                    
+                                    # Campo per inserire la correzione manuale
+                                    corrected_addr = st.text_input(f"Correggi l'indirizzo {addr_type}", value=addr, key=f"corr_{i}")
+                                    
+                                    # Pulsante per verificare l'indirizzo
+                                    col1, col2 = st.columns([1, 3])
+                                    with col1:
+                                        if st.button("Verifica", key=f"check_{i}"):
+                                            lat, lon, full_addr = geocode_address(corrected_addr)
+                                            if lat is not None:
+                                                st.success(f"Indirizzo trovato: {full_addr}")
+                                                address_corrections[(addr_type, addr)] = corrected_addr
+                                            else:
+                                                st.error("Indirizzo non trovato. Prova con un altro indirizzo.")
+                                    
+                                    st.markdown("---")
                                 
-                                if distances is None or durations is None:
-                                    st.error("Impossibile calcolare la matrice delle distanze.")
-                                    st.stop()
+                                # Pulsante per procedere con le correzioni
+                                if st.button("Applica correzioni e calcola tragitto"):
+                                    # Crea una copia del DataFrame per applicare le correzioni
+                                    corrected_df = filtered_df.copy()
+                                    
+                                    # Applica le correzioni
+                                    for (addr_type, addr), corrected in address_corrections.items():
+                                        if addr_type == "casa":
+                                            corrected_df.loc[corrected_df["CASA"] == addr, "CASA"] = corrected
+                                        else:
+                                            corrected_df.loc[corrected_df["LAVORO"] == addr, "LAVORO"] = corrected
+                                    
+                                    # Aggiorna il DataFrame principale
+                                    df.update(corrected_df)
+                                    
+                                    # Ricarica i dati corretti
+                                    casa_address = corrected_df["CASA"].iloc[0]
+                                    lavoro_addresses = corrected_df["LAVORO"].unique().tolist()
+                                    
+                                    # Procedi con il calcolo
+                                    st.success("Indirizzi corretti applicati. Calcolo del tragitto...")
+                                    st.experimental_rerun()
                             
-                            # Trova il percorso ottimale
-                            with st.spinner("Calcolo del percorso ottimale..."):
-                                # Casa è sempre indice 0
-                                optimal_route = find_optimal_route(distances, 0)
-                                
-                                # Calcola la distanza totale e la durata
-                                total_distance = 0
-                                total_duration = 0
-                                
-                                for i in range(len(optimal_route) - 1):
-                                    from_idx = optimal_route[i]
-                                    to_idx = optimal_route[i + 1]
-                                    total_distance += distances[from_idx, to_idx]
-                                    total_duration += durations[from_idx, to_idx]
-                            
-                            # Mostra i risultati
-                            st.subheader("Percorso Ottimale")
-                            
-                            # Tabella del percorso
-                            route_data = []
-                            for i in range(len(optimal_route)):
-                                idx = optimal_route[i]
-                                address = all_addresses[idx]
-                                address_type = "Casa" if idx == 0 else "Lavoro"
-                                
-                                # Calcola distanza dal punto precedente (tranne per il primo punto)
-                                distance_from_prev = None
-                                if i > 0:
-                                    prev_idx = optimal_route[i-1]
-                                    distance_from_prev = distances[prev_idx, idx]
-                                
-                                route_data.append({
-                                    "Tappa": i + 1,
-                                    "Tipo": address_type,
-                                    "Indirizzo": address,
-                                    "Distanza dalla tappa precedente (km)": f"{distance_from_prev:.2f}" if distance_from_prev is not None else "-"
-                                })
-                            
-                            route_df = pd.DataFrame(route_data)
-                            st.table(route_df)
-                            
-                            # Riepilogo totali
-                            st.subheader("Riepilogo")
-                            st.write(f"**Distanza totale:** {total_distance:.2f} km")
-                            st.write(f"**Tempo totale stimato:** {total_duration:.0f} minuti")
-                            
-                            # Creazione di link per visualizzare l'intero percorso su Google Maps
-                            st.subheader("Visualizza su Google Maps")
-                            
-                            waypoints = []
-                            for i in range(1, len(optimal_route) - 1):  # Escludi il primo e l'ultimo (Casa -> Lavori -> Casa)
-                                idx = optimal_route[i]
-                                waypoints.append(f"{all_coords[idx][0]},{all_coords[idx][1]}")
-                            
-                            # Link a Google Maps con waypoints
-                            if waypoints:
-                                start_coords = all_coords[optimal_route[0]]
-                                end_coords = all_coords[optimal_route[-1]]
-                                waypoints_str = "|".join(waypoints)
-                                
-                                google_maps_url = (
-                                    f"https://www.google.com/maps/dir/?api=1"
-                                    f"&origin={start_coords[0]},{start_coords[1]}"
-                                    f"&destination={end_coords[0]},{end_coords[1]}"
-                                    f"&waypoints={waypoints_str}"
-                                    f"&travelmode=driving"
-                                )
-                                
-                                st.markdown(f"[Apri intero percorso in Google Maps]({google_maps_url})")
                             else:
-                                # Se c'è solo un punto lavoro
-                                google_maps_url = (
-                                    f"https://www.google.com/maps/dir/?api=1"
-                                    f"&origin={all_coords[optimal_route[0]][0]},{all_coords[optimal_route[0]][1]}"
-                                    f"&destination={all_coords[optimal_route[-1]][0]},{all_coords[optimal_route[-1]][1]}"
-                                    f"&travelmode=driving"
-                                )
+                                # Tutti gli indirizzi sono validi, procedi con il calcolo
+                                all_coords = [(lat_casa, lon_casa)]
+                                all_addresses = [casa_address]
                                 
-                                st.markdown(f"[Apri percorso in Google Maps]({google_maps_url})")
-                            
-                            # Link singoli per ogni segmento del percorso
-                            with st.expander("Link ai segmenti del percorso"):
-                                for i in range(len(optimal_route) - 1):
-                                    from_idx = optimal_route[i]
-                                    to_idx = optimal_route[i + 1]
+                                for addr in lavoro_addresses:
+                                    lat, lon, _ = geocode_address(addr)
+                                    all_coords.append((lat, lon))
+                                    all_addresses.append(addr)
+                                
+                                # Calcola la matrice delle distanze
+                                with st.spinner("Calcolo delle distanze tra tutti i punti..."):
+                                    distances, durations = calculate_distance_matrix(all_coords)
                                     
-                                    from_coords = all_coords[from_idx]
-                                    to_coords = all_coords[to_idx]
+                                    if distances is None or durations is None:
+                                        st.error("Impossibile calcolare la matrice delle distanze.")
+                                        st.stop()
+                                
+                                # Trova il percorso ottimale
+                                with st.spinner("Calcolo del percorso ottimale..."):
+                                    # Casa è sempre indice 0
+                                    optimal_route = find_optimal_route(distances, 0)
                                     
-                                    from_address = all_addresses[from_idx]
-                                    to_address = all_addresses[to_idx]
+                                    # Calcola la distanza totale e la durata
+                                    total_distance = 0
+                                    total_duration = 0
                                     
-                                    segment_url = (
+                                    for i in range(len(optimal_route) - 1):
+                                        from_idx = optimal_route[i]
+                                        to_idx = optimal_route[i + 1]
+                                        total_distance += distances[from_idx, to_idx]
+                                        total_duration += durations[from_idx, to_idx]
+                                
+                                # Mostra i risultati
+                                st.subheader("Percorso Ottimale")
+                                
+                                # Tabella del percorso
+                                route_data = []
+                                for i in range(len(optimal_route)):
+                                    idx = optimal_route[i]
+                                    address = all_addresses[idx]
+                                    address_type = "Casa" if idx == 0 else "Lavoro"
+                                    
+                                    # Calcola distanza dal punto precedente (tranne per il primo punto)
+                                    distance_from_prev = None
+                                    if i > 0:
+                                        prev_idx = optimal_route[i-1]
+                                        distance_from_prev = distances[prev_idx, idx]
+                                    
+                                    route_data.append({
+                                        "Tappa": i + 1,
+                                        "Tipo": address_type,
+                                        "Indirizzo": address,
+                                        "Distanza dalla tappa precedente (km)": f"{distance_from_prev:.2f}" if distance_from_prev is not None else "-"
+                                    })
+                                
+                                route_df = pd.DataFrame(route_data)
+                                st.table(route_df)
+                                
+                                # Riepilogo totali
+                                st.subheader("Riepilogo")
+                                st.write(f"**Distanza totale:** {total_distance:.2f} km")
+                                st.write(f"**Tempo totale stimato:** {total_duration:.0f} minuti")
+                                
+                                # Creazione di link per visualizzare l'intero percorso su Google Maps
+                                st.subheader("Visualizza su Google Maps")
+                                
+                                waypoints = []
+                                for i in range(1, len(optimal_route) - 1):  # Escludi il primo e l'ultimo (Casa -> Lavori -> Casa)
+                                    idx = optimal_route[i]
+                                    waypoints.append(f"{all_coords[idx][0]},{all_coords[idx][1]}")
+                                
+                                # Link a Google Maps con waypoints
+                                if waypoints:
+                                    start_coords = all_coords[optimal_route[0]]
+                                    end_coords = all_coords[optimal_route[-1]]
+                                    waypoints_str = "|".join(waypoints)
+                                    
+                                    google_maps_url = (
                                         f"https://www.google.com/maps/dir/?api=1"
-                                        f"&origin={from_coords[0]},{from_coords[1]}"
-                                        f"&destination={to_coords[0]},{to_coords[1]}"
+                                        f"&origin={start_coords[0]},{start_coords[1]}"
+                                        f"&destination={end_coords[0]},{end_coords[1]}"
+                                        f"&waypoints={waypoints_str}"
                                         f"&travelmode=driving"
                                     )
                                     
-                                    st.markdown(f"[{from_address} → {to_address}]({segment_url})")
+                                    st.markdown(f"[Apri intero percorso in Google Maps]({google_maps_url})")
+                                else:
+                                    # Se c'è solo un punto lavoro
+                                    google_maps_url = (
+                                        f"https://www.google.com/maps/dir/?api=1"
+                                        f"&origin={all_coords[optimal_route[0]][0]},{all_coords[optimal_route[0]][1]}"
+                                        f"&destination={all_coords[optimal_route[-1]][0]},{all_coords[optimal_route[-1]][1]}"
+                                        f"&travelmode=driving"
+                                    )
+                                    
+                                    st.markdown(f"[Apri percorso in Google Maps]({google_maps_url})")
+                                
+                                # Link singoli per ogni segmento del percorso
+                                with st.expander("Link ai segmenti del percorso"):
+                                    for i in range(len(optimal_route) - 1):
+                                        from_idx = optimal_route[i]
+                                        to_idx = optimal_route[i + 1]
+                                        
+                                        from_coords = all_coords[from_idx]
+                                        to_coords = all_coords[to_idx]
+                                        
+                                        from_address = all_addresses[from_idx]
+                                        to_address = all_addresses[to_idx]
+                                        
+                                        segment_url = (
+                                            f"https://www.google.com/maps/dir/?api=1"
+                                            f"&origin={from_coords[0]},{from_coords[1]}"
+                                            f"&destination={to_coords[0]},{to_coords[1]}"
+                                            f"&travelmode=driving"
+                                        )
+                                        
+                                        st.markdown(f"[{from_address} → {to_address}]({segment_url})")
                         else:
                             st.warning(f"Nessun dato trovato per il giorno {giorno_selezionato}.")
                 else:
@@ -579,7 +512,19 @@ if uploaded_file:
             
             if not df.empty:
                 if st.button("Calcola Totale per Tutti i Giorni"):
-                    risultati_totali, distanza_totale_complessiva, durata_totale_complessiva = calculate_total_km_for_all_days(df)
+                    risultati_totali, distanza_totale_complessiva, durata_totale_complessiva, problematic_addresses = calculate_total_km_for_all_days(df)
+                    
+                    # Se ci sono indirizzi problematici, mostra un avviso e passa alla tab di correzione
+                    if problematic_addresses:
+                        st.warning(f"Attenzione: {len(problematic_addresses)} indirizzi non sono stati trovati. Vai alla tab 'Verifica Indirizzi' per correggerli.")
+                        
+                        # Memorizza gli indirizzi problematici in sessione
+                        st.session_state.problematic_addresses = problematic_addresses
+                        
+                        # Mostra link alla tab di correzione
+                        if st.button("Vai alla tab Verifica Indirizzi"):
+                            st.session_state.active_tab = "Verifica Indirizzi"
+                            st.experimental_rerun()
                     
                     if risultati_totali:
                         # Visualizza tabella con i risultati per ogni giorno
@@ -604,6 +549,149 @@ if uploaded_file:
                         st.warning("Non è stato possibile calcolare i percorsi per nessun giorno.")
             else:
                 st.info("Carica un file CSV con dati validi per calcolare la sommatoria dei chilometri.")
+        
+        with tab3:
+            st.subheader("Verifica e Correzione Indirizzi")
+            
+            if st.button("Verifica tutti gli indirizzi"):
+                # Ottieni tutti gli indirizzi unici dal DataFrame
+                casa_addresses = df["CASA"].unique().tolist()
+                lavoro_addresses = df["LAVORO"].unique().tolist()
+                all_addresses = casa_addresses + lavoro_addresses
+                
+                # Verifica gli indirizzi
+                with st.spinner("Verifica degli indirizzi in corso..."):
+                    invalid_addresses = []
+                    
+                    for addr in casa_addresses:
+                        lat, lon, _ = geocode_address(addr)
+                        if lat is None:
+                            invalid_addresses.append(("casa", addr))
+                    
+                    for addr in lavoro_addresses:
+                        lat, lon, _ = geocode_address(addr)
+                        if lat is None:
+                            invalid_addresses.append(("lavoro", addr))
+                
+                # Memorizza gli indirizzi invalidi in session_state
+                st.session_state.invalid_addresses = invalid_addresses
+                
+                # Mostra risultato
+                if invalid_addresses:
+                    st.warning(f"Trovati {len(invalid_addresses)} indirizzi non validi.")
+                else:
+                    st.success("Tutti gli indirizzi sono validi!")
+            
+            # Mostra gli indirizzi problematici se ce ne sono
+            if hasattr(st.session_state, "invalid_addresses") and st.session_state.invalid_addresses:
+                invalid_addresses = st.session_state.invalid_addresses
+                st.subheader("Correzione Indirizzi")
+                
+                # Dizionario per memorizzare le correzioni
+                corrected_addresses = {}
+                
+                for i, (addr_type, addr) in enumerate(invalid_addresses):
+                    st.markdown(f"### {i+1}. Indirizzo {addr_type}: {addr}")
+                    
+                    # Ottieni suggerimenti
+                    with st.spinner(f"Ricerca suggerimenti per {addr}..."):
+                        suggestions = get_address_suggestions(addr)
+                    
+                    # Mostra suggerimenti
+                    if suggestions:
+                        st.write("**Suggerimenti:**")
+                        cols = st.columns(min(3, len(suggestions)))
+                        for j, sugg in enumerate(suggestions):
+                            with cols[j % len(cols)]:
+                                if st.button(f"Usa: {sugg[:30]}...", key=f"sugg_{i}_{j}"):
+                                    corrected_addresses[(addr_type, addr)] = sugg
+                                    st.success(f"Selezionato: {sugg}")
+                    else:
+                        st.info("Nessun suggerimento trovato.")
+                    
+                    # Campo per la correzione manuale
+                    corrected = st.text_input(f"Correggi l'indirizzo", value=addr, key=f"corr_{i}")
+                    
+                    col1, col2 = st.columns([1, 3])
+                    with col1:
+                        if st.button("Verifica", key=f"verify_{i}"):
+                            # Verifica il nuovo indirizzo
+                            with st.spinner("Verifica in corso..."):
+                                lat, lon, full_addr = geocode_address(corrected)
+                                if lat is not None:
+                                    st.success(f"Indirizzo valido trovato: {full_addr}")
+                                    corrected_addresses[(addr_type, addr)] = corrected
+                                else:
+                                    st.error("Indirizzo non trovato. Prova con un altro indirizzo o formato.")
+                    
+                    st.markdown("---")
+                
+                # Pulsante per applicare tutte le correzioni
+                if corrected_addresses:
+                    if st.button("Applica tutte le correzioni"):
+                        # Crea una copia del DataFrame
+                        corrected_df = df.copy()
+                        
+                        # Applica le correzioni
+                        for (addr_type, old_addr), new_addr in corrected_addresses.items():
+                            if addr_type == "casa":
+                                corrected_df.loc[corrected_df["CASA"] == old_addr, "CASA"] = new_addr
+                            else:
+                                corrected_df.loc[corrected_df["LAVORO"] == old_addr, "LAVORO"] = new_addr
+                        
+                        # Aggiorna il DataFrame originale
+                        df.update(corrected_df)
+                        
+                        # Salva il DataFrame corretto nella session_state
+                        st.session_state.df = df
+                        
+                        st.success("Correzioni applicate con successo!")
+                        
+                        # Verifica che tutti gli indirizzi siano validi dopo le correzioni
+                        all_valid = True
+                        for (_, old_addr), new_addr in corrected_addresses.items():
+                            lat, lon, _ = geocode_address(new_addr)
+                            if lat is None:
+                                all_valid = False
+                                break
+                        
+                        if all_valid:
+                            st.success("Tutti gli indirizzi sono ora validi! Puoi procedere con il calcolo del tragitto.")
+                            # Pulisce l'elenco degli indirizzi invalidi
+                            st.session_state.invalid_addresses = []
+                        else:
+                            st.warning("Alcuni indirizzi sono ancora invalidi. Controlla nuovamente.")
+            
+            # Mostra gli indirizzi problematici trovati durante il calcolo complessivo
+            elif hasattr(st.session_state, "problematic_addresses") and st.session_state.problematic_addresses:
+                problematic_addresses = st.session_state.problematic_addresses
+                st.subheader("Indirizzi problematici trovati durante il calcolo")
+                
+                # Raggruppa gli indirizzi per tipo e giorno
+                grouped_addresses = {}
+                for addr_type, addr, giorno in problematic_addresses:
+                    key = (addr_type, giorno)
+                    if key not in grouped_addresses:
+                        grouped_addresses[key] = []
+                    grouped_addresses[key].append(addr)
+                
+                # Mostra gli indirizzi raggruppati
+                for (addr_type, giorno), addresses in grouped_addresses.items():
+                    st.markdown(f"### {addr_type.capitalize()} - Giorno {giorno}")
+                    for i, addr in enumerate(addresses):
+                        st.write(f"{i+1}. {addr}")
+                
+                # Pulsante per andare alla correzione manuale
+                if st.button("Correggi questi indirizzi"):
+                    # Converti problematic_addresses nel formato di invalid_addresses
+                    invalid_addresses = [(addr_type, addr) for addr_type, addr, _ in problematic_addresses]
+                    # Rimuovi duplicati
+                    invalid_addresses = list(set(invalid_addresses))
+                    st.session_state.invalid_addresses = invalid_addresses
+                    st.experimental_rerun()
+            else:
+                st.info("Clicca su 'Verifica tutti gli indirizzi' per iniziare il processo di verifica.")
+
 else:
     st.info("Carica un file CSV con colonne 'CASA', 'LAVORO' e 'GIORNO' per iniziare.")
     
@@ -618,4 +706,62 @@ else:
             lavoro = st.text_input("Indirizzo di lavoro")
             giorno = st.date_input("Giorno", datetime.now())
             
-            submit = st.form_submit_button("
+            submit = st.form_submit_button("Aggiungi")
+            
+            if submit and casa and lavoro:
+                new_row = pd.DataFrame({
+                    "CASA": [casa], 
+                    "LAVORO": [lavoro], 
+                    "GIORNO": [giorno.strftime("%d/%m/%Y")]
+                })
+                df = pd.concat([df, new_row], ignore_index=True)
+                
+                # Scarica il file creato
+                csv = df.to_csv(sep=";", index=False)
+                st.download_button(
+                    label="Scarica CSV",
+                    data=csv,
+                    file_name="indirizzi.csv",
+                    mime="text/csv"
+                )
+                
+                st.success("File creato con successo!")
+                st.dataframe(df)
+
+# Aggiungi istruzioni d'uso
+with st.expander("Come usare questa applicazione"):
+    st.markdown("""
+    ### Istruzioni per l'uso
+    
+    1. **Carica il tuo file CSV** con le colonne CASA, LAVORO e GIORNO.
+    2. **Seleziona un giorno** dalla lista dei giorni disponibili oppure usa la tab "Riepilogo Totale" per calcolare i km totali per tutti i giorni.
+    3. **Premi 'Calcola Tragitto Ottimale'** per vedere il percorso ottimale che inizia da casa, passa per tutti i luoghi di lavoro e torna a casa.
+    4. **Premi 'Calcola Totale per Tutti i Giorni'** nella tab "Riepilogo Totale" per vedere la sommatoria dei chilometri per tutti i giorni.
+    5. **Usa la tab 'Verifica Indirizzi'** per controllare e correggere eventuali indirizzi problematici.
+    
+    ### Formato del file CSV
+    
+    Il file CSV deve avere le seguenti colonne:
+    - **CASA**: indirizzo completo dell'abitazione
+    - **LAVORO**: indirizzo completo del posto di lavoro
+    - **GIORNO**: data nel formato GG/MM/AAAA
+    
+    Esempio:
+    ```
+    CASA;LAVORO;GIORNO
+    Via Roma 1, Milano;Via Dante 15, Milano;01/05/2025
+    Via Roma 1, Milano;Via Montenapoleone 8, Milano;01/05/2025
+    Via Roma 1, Milano;Piazza Duomo 1, Milano;01/05/2025
+    ```
+    
+    ### Note sulla correzione degli indirizzi
+    
+    - Se un indirizzo non viene trovato, l'applicazione ti permetterà di correggerlo.
+    - Per ogni indirizzo problematico, l'app suggerirà indirizzi alternativi quando possibile.
+    - Puoi verificare individualmente ciascun indirizzo cliccando sul pulsante "Verifica".
+    - Una volta corretti tutti gli indirizzi, potrai applicare le correzioni e procedere con il calcolo del tragitto.
+    """)
+
+# Footer con informazioni
+st.markdown("---")
+st.markdown("Applicazione creata con Streamlit. Utilizza le API gratuite di OpenStreetMap e OSRM.")
