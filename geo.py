@@ -363,26 +363,20 @@ if uploaded_file:
                                 
                                 # Pulsante per procedere con le correzioni
                                 if st.button("Applica correzioni e calcola tragitto"):
-                                    # Crea una copia del DataFrame per applicare le correzioni
-                                    corrected_df = filtered_df.copy()
-                                    
-                                    # Applica le correzioni
-                                    for (addr_type, addr), corrected in address_corrections.items():
-                                        if addr_type == "casa":
-                                            corrected_df.loc[corrected_df["CASA"] == addr, "CASA"] = corrected
-                                        else:
-                                            corrected_df.loc[corrected_df["LAVORO"] == addr, "LAVORO"] = corrected
-                                    
-                                    # Aggiorna il DataFrame principale
-                                    df.update(corrected_df)
-                                    
-                                    # Ricarica i dati corretti
-                                    casa_address = corrected_df["CASA"].iloc[0]
-                                    lavoro_addresses = corrected_df["LAVORO"].unique().tolist()
-                                    
-                                    # Procedi con il calcolo
-                                    st.success("Indirizzi corretti applicati. Calcolo del tragitto...")
-                                    st.experimental_rerun()
+    # Applica le correzioni direttamente al DataFrame principale
+    for (addr_type, addr), corrected in address_corrections.items():
+        if addr_type == "casa":
+            df.loc[df["CASA"] == addr, "CASA"] = corrected
+        else:
+            df.loc[df["LAVORO"] == addr, "LAVORO"] = corrected
+    
+    # Ricarica i dati corretti
+    casa_address = df.loc[df["GIORNO"] == giorno_selezionato, "CASA"].iloc[0]
+    lavoro_addresses = df.loc[df["GIORNO"] == giorno_selezionato, "LAVORO"].unique().tolist()
+    
+    # Procedi con il calcolo
+    st.success("Indirizzi corretti applicati. Calcolo del tragitto...")
+    st.experimental_rerun()
                             
                             else:
                                 # Tutti gli indirizzi sono validi, procedi con il calcolo
@@ -628,39 +622,32 @@ if uploaded_file:
                 
                 # Pulsante per applicare tutte le correzioni
                 if corrected_addresses:
-                    if st.button("Applica tutte le correzioni"):
-                        # Crea una copia del DataFrame
-                        corrected_df = df.copy()
-                        
-                        # Applica le correzioni
-                        for (addr_type, old_addr), new_addr in corrected_addresses.items():
-                            if addr_type == "casa":
-                                corrected_df.loc[corrected_df["CASA"] == old_addr, "CASA"] = new_addr
-                            else:
-                                corrected_df.loc[corrected_df["LAVORO"] == old_addr, "LAVORO"] = new_addr
-                        
-                        # Aggiorna il DataFrame originale
-                        df.update(corrected_df)
-                        
-                        # Salva il DataFrame corretto nella session_state
-                        st.session_state.df = df
-                        
-                        st.success("Correzioni applicate con successo!")
-                        
-                        # Verifica che tutti gli indirizzi siano validi dopo le correzioni
-                        all_valid = True
-                        for (_, old_addr), new_addr in corrected_addresses.items():
-                            lat, lon, _ = geocode_address(new_addr)
-                            if lat is None:
-                                all_valid = False
-                                break
-                        
-                        if all_valid:
-                            st.success("Tutti gli indirizzi sono ora validi! Puoi procedere con il calcolo del tragitto.")
-                            # Pulisce l'elenco degli indirizzi invalidi
-                            st.session_state.invalid_addresses = []
-                        else:
-                            st.warning("Alcuni indirizzi sono ancora invalidi. Controlla nuovamente.")
+                    if corrected_addresses:
+    if st.button("Applica tutte le correzioni"):
+        # Applica direttamente le correzioni al DataFrame originale
+        for (addr_type, old_addr), new_addr in corrected_addresses.items():
+            mask = df[f"{addr_type.upper()}"] == old_addr
+            df.loc[mask, f"{addr_type.upper()}"] = new_addr
+        
+        # Salva il DataFrame corretto nella session_state
+        st.session_state.df = df
+        
+        st.success("Correzioni applicate con successo!")
+        
+        # Verifica che tutti gli indirizzi siano validi dopo le correzioni
+        invalid_remaining = False
+        for (_, _), new_addr in corrected_addresses.items():
+            lat, lon, _ = geocode_address(new_addr)
+            if lat is None:
+                invalid_remaining = True
+                break
+        
+        if not invalid_remaining:
+            st.success("Tutti gli indirizzi sono ora validi! Puoi procedere con il calcolo del tragitto.")
+            # Pulisce l'elenco degli indirizzi invalidi
+            st.session_state.invalid_addresses = []
+        else:
+            st.warning("Alcuni indirizzi sono ancora invalidi. Controlla nuovamente.")
             
             # Mostra gli indirizzi problematici trovati durante il calcolo complessivo
             elif hasattr(st.session_state, "problematic_addresses") and st.session_state.problematic_addresses:
