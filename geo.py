@@ -618,44 +618,4 @@ else:
             lavoro = st.text_input("Indirizzo di lavoro")
             giorno = st.date_input("Giorno", datetime.now())
             
-            submit = st.form_submit_button("Aggiungi")
-            
-            if submit and casa and lavoro:
-                # Verifica gli indirizzi prima di aggiungerli
-                casa_valid, _ = verify_address(casa)
-                lavoro_valid, _ = verify_address(lavoro)
-                
-                if not casa_valid:
-                    st.error(f"Indirizzo di casa non valido: {casa}")
-                if not lavoro_valid:
-                    st.error(f"Indirizzo di lavoro non valido: {lavoro}")
-                
-                if casa_valid and lavoro_valid:
-                    new_row = pd.DataFrame({
-                        "CASA": [casa], 
-                        "LAVORO": [lavoro], 
-                        "GIORNO": [giorno.strftime("%d/%m/%Y")]
-                    })
-                    df = pd.concat([df, new_row], ignore_index=True)
-                    
-                    # Scarica il file creato
-                    csv = df.to_csv(sep=";", index=False)
-                    st.download_button(
-                        label="Scarica CSV",
-                        data=csv,
-                        file_name="indirizzi.csv",
-                        mime="text/csv"
-                    )
-                    
-                    st.success("File creato con successo!")
-                    st.dataframe(df)
-
-# Aggiungi istruzioni d'uso
-with st.expander("Come usare questa applicazione"):
-    st.markdown("""
-    ### Istruzioni per l'uso
-    
-    1. **Carica il tuo file CSV** con le colonne CASA, LAVORO e GIORNO.
-    2. **Verifica la validità degli indirizzi** con il pulsante dedicato. Segui le istruzioni per correggere eventuali indirizzi non validi.
-    3. **Seleziona un giorno** dalla lista dei giorni disponibili oppure usa la tab "Riepilogo Totale" per calcolare i km totali per tutti i giorni.
-    4. **Premi
+            submit = st.form_submit_button("
