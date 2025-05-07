@@ -36,11 +36,16 @@ def geocode_address(address):
         params = {
             "q": address,
             "format": "json",
-            "limit": 1
+            "limit": 1,
+            "addressdetails": 1     # Richiedi dettagli dell'indirizzo
         }
         headers = {
             "User-Agent": "TragittoCalculator/1.0"  # Necessario per le regole di Nominatim
         }
+        
+        # Aggiungi un ritardo per rispettare i limiti di utilizzo di Nominatim (max 1 richiesta al secondo)
+        import time
+        time.sleep(1)
         
         response = requests.get(base_url, params=params, headers=headers)
         data = response.json()
@@ -57,6 +62,9 @@ def geocode_address(address):
 
 # Funzione per verificare la validità di un indirizzo
 def verify_address(address):
+    if not address or address.strip() == "":
+        return False, None
+    
     result = geocode_address(address)
     return result is not None, result
 
@@ -254,88 +262,123 @@ if uploaded_file:
         st.dataframe(df.head())
         
         # Verifica se ci sono indirizzi non validi
-        if st.button("Verifica validità degli indirizzi"):
-            invalid_addresses = check_all_addresses(df)
-            
-            if invalid_addresses:
-                st.error(f"Trovati {len(invalid_addresses)} indirizzi non validi!")
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            if st.button("Verifica validità degli indirizzi", type="primary"):
+                with st.spinner("Verifico tutti gli indirizzi..."):
+                    invalid_addresses = check_all_addresses(df)
                 
-                # Salva gli indirizzi non validi nella session_state
-                if 'invalid_addresses' not in st.session_state:
+                if invalid_addresses:
+                    st.error(f"Trovati {len(invalid_addresses)} indirizzi non validi!")
+                    
+                    # Salva gli indirizzi non validi nella session_state
                     st.session_state.invalid_addresses = invalid_addresses
                     # Inizializza i campi di testo per la correzione
                     st.session_state.address_corrections = {addr: addr for addr in invalid_addresses}
                     # Inizializza lo stato di validità per ogni indirizzo corretto
                     st.session_state.address_valid_status = {addr: False for addr in invalid_addresses}
-            else:
-                st.success("Tutti gli indirizzi sono validi!")
-                # Resetta le variabili di session_state relative agli indirizzi non validi
-                if 'invalid_addresses' in st.session_state:
-                    del st.session_state.invalid_addresses
-                if 'address_corrections' in st.session_state:
-                    del st.session_state.address_corrections
-                if 'address_valid_status' in st.session_state:
-                    del st.session_state.address_valid_status
+                    
+                    # Forza un refresh della pagina per mostrare i form
+                    st.experimental_rerun()
+                else:
+                    st.success("Tutti gli indirizzi sono validi!")
+                    # Resetta le variabili di session_state relative agli indirizzi non validi
+                    if 'invalid_addresses' in st.session_state:
+                        del st.session_state.invalid_addresses
+                    if 'address_corrections' in st.session_state:
+                        del st.session_state.address_corrections
+                    if 'address_valid_status' in st.session_state:
+                        del st.session_state.address_valid_status
+                    if 'form_keys' in st.session_state:
+                        del st.session_state.form_keys
         
-        # Mostra l'interfaccia per correggere gli indirizzi non validi
+                    # Mostra l'interfaccia per correggere gli indirizzi non validi
         if 'invalid_addresses' in st.session_state and st.session_state.invalid_addresses:
             st.subheader("Correzione degli indirizzi non validi")
             st.markdown("Modifica gli indirizzi non validi e premi 'Check' per verificare la loro validità.")
             
+            # Inizializza i form keys se non esistono
+            if 'form_keys' not in st.session_state:
+                st.session_state.form_keys = {}
+                for addr in st.session_state.invalid_addresses:
+                    st.session_state.form_keys[addr] = f"form_{addr.replace(' ', '_').replace(',', '')}"
+            
             # Crea campi di testo editabili per ogni indirizzo non valido
             for addr in st.session_state.invalid_addresses:
-                col1, col2, col3 = st.columns([3, 1, 1])
+                # Identifica univocamente ciascun indirizzo
+                form_key = st.session_state.form_keys[addr]
                 
-                with col1:
-                    # Campo di testo per correggere l'indirizzo
-                    corrected_addr = st.text_input(f"Indirizzo non valido: {addr}", 
-                                                  value=st.session_state.address_corrections[addr],
-                                                  key=f"correction_{addr}")
-                    # Aggiorna il valore corrente nella session_state
-                    st.session_state.address_corrections[addr] = corrected_addr
+                # Mostra lo stato di validità corrente
+                if st.session_state.address_valid_status[addr]:
+                    st.success(f"✓ L'indirizzo è stato convalidato")
+                else:
+                    st.error(f"✗ Indirizzo non valido: {addr}")
                 
-                with col2:
+                # Crea un form per ogni indirizzo
+                with st.form(key=form_key):
+                    col1, col2 = st.columns([4, 1])
+                    
+                    with col1:
+                        # Campo di testo per correggere l'indirizzo
+                        corrected_addr = st.text_input(
+                            "Nuovo indirizzo", 
+                            value=st.session_state.address_corrections[addr],
+                            key=f"input_{form_key}"
+                        )
+                    
                     # Pulsante per verificare l'indirizzo corretto
-                    if st.button("Check", key=f"check_{addr}"):
-                        is_valid, _ = verify_address(corrected_addr)
+                    check_button = st.form_submit_button("Check")
+                    
+                    if check_button:
+                        # Aggiorna il valore corrente nella session_state
+                        st.session_state.address_corrections[addr] = corrected_addr
+                        
+                        # Verifica la validità
+                        is_valid, coords = verify_address(corrected_addr)
                         if is_valid:
                             st.session_state.address_valid_status[addr] = True
-                            st.success("Indirizzo valido!")
+                            st.success(f"✓ Indirizzo valido! Coordinate: {coords}")
                         else:
                             st.session_state.address_valid_status[addr] = False
-                            st.error("Indirizzo ancora non valido!")
+                            st.error("✗ Indirizzo ancora non valido, prova a essere più specifico.")
                 
-                with col3:
-                    # Mostra lo stato di validità dell'indirizzo
-                    if st.session_state.address_valid_status[addr]:
-                        st.success("Valido ✓")
-                    else:
-                        st.error("Non valido ✗")
+                # Aggiungi un separatore tra i form
+                st.markdown("---")
             
             # Pulsante per applicare tutte le correzioni
-            if st.button("Applica tutte le correzioni"):
-                # Verifica se tutti gli indirizzi sono stati corretti e validati
-                if all(st.session_state.address_valid_status.values()):
-                    # Applica le correzioni al dataframe
-                    df_copy = df.copy()
-                    
-                    for old_addr, new_addr in st.session_state.address_corrections.items():
-                        # Sostituisci sia nella colonna CASA che LAVORO
-                        df_copy.loc[df_copy["CASA"] == old_addr, "CASA"] = new_addr
-                        df_copy.loc[df_copy["LAVORO"] == old_addr, "LAVORO"] = new_addr
-                    
-                    # Aggiorna il dataframe nella session_state
-                    st.session_state.df = df_copy
-                    
-                    # Resetta gli indirizzi non validi
-                    del st.session_state.invalid_addresses
-                    del st.session_state.address_corrections
-                    del st.session_state.address_valid_status
-                    
-                    st.success("Tutte le correzioni sono state applicate con successo!")
-                    st.experimental_rerun()
-                else:
-                    st.error("Non tutti gli indirizzi sono stati corretti e validati. Verifica ogni indirizzo con il pulsante 'Check'.")
+            col1, col2 = st.columns([1, 4])
+            with col1:
+                if st.button("Applica tutte le correzioni", type="primary"):
+                    # Verifica se tutti gli indirizzi sono stati corretti e validati
+                    if all(st.session_state.address_valid_status.values()):
+                        # Applica le correzioni al dataframe
+                        df_copy = df.copy()
+                        
+                        for old_addr, new_addr in st.session_state.address_corrections.items():
+                            # Sostituisci sia nella colonna CASA che LAVORO
+                            df_copy.loc[df_copy["CASA"] == old_addr, "CASA"] = new_addr
+                            df_copy.loc[df_copy["LAVORO"] == old_addr, "LAVORO"] = new_addr
+                        
+                        # Aggiorna il dataframe nella session_state
+                        st.session_state.df = df_copy
+                        
+                        # Resetta gli indirizzi non validi
+                        del st.session_state.invalid_addresses
+                        del st.session_state.address_corrections
+                        del st.session_state.address_valid_status
+                        if 'form_keys' in st.session_state:
+                            del st.session_state.form_keys
+                        
+                        st.success("Tutte le correzioni sono state applicate con successo!")
+                        st.experimental_rerun()
+                    else:
+                        st.error("Non tutti gli indirizzi sono stati corretti e validati. Verifica ogni indirizzo con il pulsante 'Check'.")
+            
+            # Mostra un conteggio degli indirizzi validi/non validi
+            valid_count = sum(st.session_state.address_valid_status.values())
+            total_count = len(st.session_state.address_valid_status)
+            with col2:
+                st.info(f"Indirizzi validi: {valid_count}/{total_count}")
         
         # Aggiungi tab per separare le funzionalità
         tab1, tab2 = st.tabs(["Calcolo Giornaliero", "Riepilogo Totale"])
